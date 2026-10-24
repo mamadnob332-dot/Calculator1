@@ -48,6 +48,9 @@ body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"S
 .setup input{font:inherit;font-size:1.6rem;text-align:center;letter-spacing:.3em;padding:14px;border-radius:14px;border:2px solid var(--op);background:var(--panel);color:var(--fg);direction:ltr}
 .setup p{margin:0;line-height:1.8;color:var(--dim)}
 .view{background:#000;z-index:9}
+.view video{max-width:100%;max-height:100%;flex:1;min-height:0;background:#000}
+[hidden]{display:none!important}
+.cell{position:relative}.pl{position:absolute;right:6px;bottom:6px;width:26px;height:26px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;pointer-events:none}
 .view img{max-width:100%;max-height:100%;object-fit:contain;flex:1;min-height:0}
 .view .bar{padding:12px 16px}
 </style>
@@ -87,14 +90,14 @@ body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"S
 </div></div>
 
 <div class="layer" id="vault"><div class="in">
-  <div class="bar"><h2>گالری</h2><div style="display:flex;gap:8px"><button class="btn p" id="add">افزودن عکس</button><button class="btn" id="lock">قفل</button></div></div>
+  <div class="bar"><h2>گالری</h2><div style="display:flex;gap:8px"><button class="btn p" id="add">افزودن عکس و فیلم</button><button class="btn" id="lock">قفل</button></div></div>
   <div class="grid" id="grid"></div>
-  <input type="file" id="file" accept="image/*" multiple hidden>
+  <input type="file" id="file" accept="image/*,video/*" multiple hidden>
 </div></div>
 
 <div class="layer view" id="view"><div class="in" style="padding:0;color:#fff">
   <div class="bar"><button class="btn" id="vclose">بستن</button><button class="btn d" id="vdel">حذف</button></div>
-  <img id="vimg" alt="">
+  <img id="vimg" alt=""><video id="vvid" controls playsinline hidden></video>
 </div></div>
 
 <script>
@@ -199,33 +202,68 @@ $("setupBtn").onclick=function(){
 /* ---------- vault ---------- */
 function openVault(){expr="";fresh=false;render();$("vault").classList.add("on");loadGrid()}
 function lock(){key=null;urls.forEach(URL.revokeObjectURL);urls=[];$("grid").innerHTML="";
-  $("view").classList.remove("on");$("vimg").removeAttribute("src");$("vault").classList.remove("on");expr="";fresh=false;render()}
+  closeView();$("vault").classList.remove("on");expr="";fresh=false;render()}
 $("lock").onclick=lock;
-document.addEventListener("visibilitychange",function(){if(document.hidden&&key)lock()});
+document.addEventListener("visibilitychange",function(){if(document.hidden){if(key&&!picking)lock()}else setTimeout(function(){picking=false},2000)});
+function parts(it){var d=it.d;return d.full?d:{kind:"image",mime:"image/jpeg",thumb:d,full:d}}
 function loadGrid(){
   var g=$("grid");g.innerHTML="";urls.forEach(URL.revokeObjectURL);urls=[];
   allImgs().then(function(list){
-    if(!list.length){g.innerHTML='<div class="empty">هنوز عکسی اضافه نشده.<br>روی «افزودن عکس» بزن.</div>';return}
+    if(!list.length){g.innerHTML='<div class="empty">هنوز چیزی اضافه نشده.<br>روی «افزودن» بزن.</div>';return}
     list.forEach(function(it){
-      decrypt(key,it.d).then(function(buf){
+      var p=parts(it),cell=document.createElement("div");cell.className="cell";g.appendChild(cell);
+      decrypt(key,p.thumb).then(function(buf){
         var u=URL.createObjectURL(new Blob([buf],{type:"image/jpeg"}));urls.push(u);
-        var im=new Image();im.src=u;im.alt="";im.onclick=function(){openView(u,it.id)};g.appendChild(im)}).catch(function(){})})})}
-$("add").onclick=function(){$("file").click()};
+        var im=new Image();im.src=u;im.alt="";im.onclick=function(){openItem(it.id,p)};cell.appendChild(im);
+        if(p.kind==="video"){var s=document.createElement("span");s.className="pl";s.textContent="\u25B6";cell.appendChild(s)}
+      }).catch(function(){cell.remove()})})})}
+var picking=false,MAXV=400*1024*1024;
+$("add").onclick=function(){picking=true;$("file").click()};
 $("file").onchange=function(){
   var files=Array.prototype.slice.call(this.files);this.value="";
-  var chain=Promise.resolve();
-  files.forEach(function(f){chain=chain.then(function(){return shrink(f)}).then(function(buf){return encrypt(key,buf)}).then(putImg).catch(function(){})});
-  chain.then(loadGrid)};
-function shrink(f){return createImageBitmap(f).then(function(bm){
-  var s=Math.min(1,1800/Math.max(bm.width,bm.height)),c=document.createElement("canvas");
+  var chain=Promise.resolve(),skipped=0;
+  files.forEach(function(f){chain=chain.then(function(){return importFile(f)}).catch(function(e){if(e==="big")skipped++})});
+  chain.then(function(){
+    if(skipped){var t=document.querySelector("#vault h2");t.textContent="فایل بزرگ‌تر از ۴۰۰ مگابایت اضافه نشد";setTimeout(function(){t.textContent="گالری"},4000)}
+    loadGrid()})};
+function importFile(f){
+  if(/^video\//.test(f.type)){
+    if(f.size>MAXV)return Promise.reject("big");
+    return Promise.all([vidThumb(f),f.arrayBuffer()]).then(function(r){
+      return Promise.all([encrypt(key,r[0]),encrypt(key,r[1])]).then(function(e){
+        return putImg({kind:"video",mime:f.type||"video/mp4",thumb:e[0],full:e[1]})})})}
+  return createImageBitmap(f).then(function(bm){
+    return Promise.all([scale(bm,1800,.88),scale(bm,420,.8)])}).then(function(r){
+    return Promise.all([encrypt(key,r[0]),encrypt(key,r[1])])}).then(function(e){
+    return putImg({kind:"image",mime:"image/jpeg",thumb:e[1],full:e[0]})})}
+function blobBuf(c,q){return new Promise(function(res,rej){c.toBlob(function(b){b?b.arrayBuffer().then(res):rej()},"image/jpeg",q)})}
+function scale(bm,max,q){
+  var s=Math.min(1,max/Math.max(bm.width,bm.height)),c=document.createElement("canvas");
   c.width=Math.round(bm.width*s);c.height=Math.round(bm.height*s);c.getContext("2d").drawImage(bm,0,0,c.width,c.height);
-  return new Promise(function(res,rej){c.toBlob(function(b){b?b.arrayBuffer().then(res):rej()},"image/jpeg",.88)})})}
-var curId=null,armed=false;
-function openView(u,id){curId=id;armed=false;$("vdel").textContent="حذف";$("vimg").src=u;$("view").classList.add("on")}
-$("vclose").onclick=function(){$("view").classList.remove("on")};
+  return blobBuf(c,q)}
+function vidThumb(f){return new Promise(function(res){
+  var u=URL.createObjectURL(f),v=document.createElement("video"),done=false;
+  function fin(c){if(done)return;done=true;URL.revokeObjectURL(u);blobBuf(c,.8).then(res).catch(function(){res(new ArrayBuffer(0))})}
+  function fallback(){var c=document.createElement("canvas");c.width=c.height=300;var x=c.getContext("2d");x.fillStyle="#2a2d38";x.fillRect(0,0,300,300);fin(c)}
+  v.muted=true;v.playsInline=true;v.preload="auto";v.src=u;
+  v.onloadeddata=function(){try{v.currentTime=Math.min(0.5,(v.duration||1)/2)}catch(e){fallback()}};
+  v.onseeked=function(){try{
+    if(!v.videoWidth)return fallback();
+    var s=Math.min(1,420/Math.max(v.videoWidth,v.videoHeight)),c=document.createElement("canvas");
+    c.width=Math.round(v.videoWidth*s);c.height=Math.round(v.videoHeight*s);c.getContext("2d").drawImage(v,0,0,c.width,c.height);fin(c)}catch(e){fallback()}};
+  v.onerror=fallback;setTimeout(fallback,8000)})}
+var curId=null,armed=false,vurl=null;
+function closeView(){var v=$("vvid");v.pause();v.removeAttribute("src");v.load();$("vimg").removeAttribute("src");if(vurl){URL.revokeObjectURL(vurl);vurl=null}$("view").classList.remove("on")}
+function openItem(id,p){
+  decrypt(key,p.full).then(function(buf){
+    vurl=URL.createObjectURL(new Blob([buf],{type:p.mime}));curId=id;armed=false;$("vdel").textContent="حذف";
+    var isV=p.kind==="video";$("vimg").hidden=isV;$("vvid").hidden=!isV;
+    if(isV)$("vvid").src=vurl;else $("vimg").src=vurl;
+    $("view").classList.add("on")}).catch(function(){})}
+$("vclose").onclick=closeView;
 $("vdel").onclick=function(){
   if(!armed){armed=true;this.textContent="تأیید حذف";return}
-  delImg(curId).then(function(){$("view").classList.remove("on");loadGrid()})};
+  delImg(curId).then(function(){closeView();loadGrid()})};
 
 /* ---------- start ---------- */
 if("serviceWorker"in navigator){try{navigator.serviceWorker.register("sw.js").catch(function(){})}catch(e){}}
